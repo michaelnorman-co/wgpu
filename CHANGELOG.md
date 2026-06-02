@@ -48,6 +48,10 @@ Bottom level categories:
 
 - Add `Device::create_compute_pipeline_async` / `Device::create_render_pipeline_async`. On the WebGPU backend these map to `GPUDevice.createPipelineAsync`; on native, an optional `InstanceDescriptor::task_executor` (a new `TaskExecutor` hook) lets you run the compile off the calling thread, otherwise it runs inline. Mirroring the WebGPU spec, the async variants _return_ an error rather than reporting it via the error scope. By @michaelnorman-au in [#3794](https://github.com/gfx-rs/wgpu/issues/3794).
 
+#### Metal
+
+- Implement `Features::PIPELINE_CACHE` via `MTLBinaryArchive`, so compiled compute and render pipelines can be serialized and reloaded across runs instead of recompiled. By @michaelnorman-au in [#99999](https://github.com/gfx-rs/wgpu/pull/99999).
+
 ## v30.0.1 (2026-08-21)
 
 ### Bug Fixes
