@@ -50,7 +50,7 @@ Bottom level categories:
 
 #### Metal
 
-- Implement `Features::PIPELINE_CACHE` via `MTLBinaryArchive`, so compiled compute and render pipelines can be serialized and reloaded across runs instead of recompiled. By @michaelnorman-au in [#99999](https://github.com/gfx-rs/wgpu/pull/99999).
+- Implement `Features::PIPELINE_CACHE` via `MTLBinaryArchive`, so compiled compute and render pipelines can be serialized and reloaded across runs instead of recompiled. By @michaelnorman-au in [#9623](https://github.com/gfx-rs/wgpu/pull/9623).
 
 ## v30.0.1 (2026-08-21)
 
