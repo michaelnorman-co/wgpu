@@ -147,7 +147,7 @@ pub use wgt::{
     PrimitiveTopology, QueryType, RenderBundleDepthStencil, RequestAdapterError,
     SamplerBindingType, SamplerBorderColor, ShaderLocation, ShaderModel, ShaderRuntimeChecks,
     ShaderStages, StencilFaceState, StencilOperation, StencilState, StorageTextureAccess,
-    SurfaceCapabilities, SurfaceStatus, TexelCopyBufferLayout, TextureAspect, TextureChannel,
+    SurfaceCapabilities, SurfaceStatus, Task, TaskExecutor, TexelCopyBufferLayout, TextureAspect, TextureChannel,
     TextureDimension, TextureFormat, TextureFormatFeatureFlags, TextureFormatFeatures,
     TextureSampleType, TextureTransition, TextureUsages, TextureUses, TextureViewDimension, Trace,
     VertexAttribute, VertexFormat, VertexStepMode, WasmNotSend, WasmNotSendSync, WasmNotSync,
