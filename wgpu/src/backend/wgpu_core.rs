@@ -1112,11 +1112,11 @@ fn owned_render_pipeline_descriptor(
         .buffers
         .iter()
         .map(|vbuf| {
-            vbuf.as_ref().map(|vbuf| pipe::VertexBufferLayout {
+            pipe::VertexBufferLayout {
                 array_stride: vbuf.array_stride,
                 step_mode: vbuf.step_mode,
                 attributes: Cow::Owned(vbuf.attributes.to_vec()),
-            })
+            }
         })
         .collect();
 
