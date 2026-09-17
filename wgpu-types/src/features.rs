@@ -1153,7 +1153,7 @@ bitflags_array! {
         ///
         /// Supported platforms:
         /// - Vulkan
-        /// - Metal (via `MTLBinaryArchive`)
+        /// - Metal (macOS 15.4+ / iOS 18.4+, via `MTLBinaryArchive`)
         ///
         /// Unimplemented Platforms:
         /// - DX12

@@ -1624,38 +1624,55 @@ impl crate::Device for super::Device {
             // Create the pipeline from descriptor
             let raw = match descriptor {
                 MetalGenericRenderPipelineDescriptor::Standard(d) => {
-                    // Bind the cache's archive so the driver loads this pipeline from
-                    // it on a hit instead of recompiling (no `FailOnBinaryArchiveMiss`
-                    // — a miss just compiles). Held under the read lock so a load is
-                    // not raced by a concurrent grow. (Mesh render pipeline descriptors
-                    // don't expose `binaryArchives`, so the Mesh arm below can't be
-                    // archive-cached.)
-                    let raw = {
-                        let _read = desc.cache.map(|cache| {
-                            let guard = cache.archive_lock.read();
-                            let archives = NSArray::from_slice(&[cache.archive.as_ref()]);
-                            d.setBinaryArchives(Some(&archives));
-                            guard
-                        });
-                        self.shared
-                            .device
-                            .newRenderPipelineStateWithDescriptor_error(&d)
-                    };
-                    // Grow the archive with this pipeline so a later
-                    // `pipeline_cache_get_data` serializes it (best-effort). The write
-                    // lock excludes concurrent loads/grows.
+                    // Same shape as `create_compute_pipeline`: with a cache attached,
+                    // probe the archive first (`FailOnBinaryArchiveMiss`), count the
+                    // answer, and only compile — then grow the archive — on a miss.
+                    // (Mesh render pipeline descriptors don't expose `binaryArchives`,
+                    // so the Mesh arm below can't be archive-cached.)
+                    let mut hit = None;
                     if let Some(cache) = desc.cache {
-                        let _guard = cache.archive_lock.write();
-                        if let Err(e) = cache
-                            .archive
-                            .addRenderPipelineFunctionsWithDescriptor_error(&d)
-                        {
-                            log::debug!(
-                                "metal: failed to add render pipeline to binary archive: {e:?}"
-                            );
+                        let _read = cache.archive_lock.read();
+                        let archives = NSArray::from_slice(&[cache.archive.as_ref()]);
+                        d.setBinaryArchives(Some(&archives));
+                        match self
+                            .shared
+                            .device
+                            .newRenderPipelineStateWithDescriptor_options_reflection_error(
+                                &d,
+                                MTLPipelineOption::FailOnBinaryArchiveMiss,
+                                None,
+                            ) {
+                            Ok(loaded) => {
+                                self.counters.pipeline_cache_hits.add(1);
+                                hit = Some(loaded);
+                            }
+                            Err(e) => {
+                                log::debug!("metal: render pipeline binary archive miss: {e:?}");
+                                self.counters.pipeline_cache_misses.add(1);
+                            }
                         }
                     }
-                    raw
+                    match hit {
+                        Some(loaded) => Ok(loaded),
+                        None => {
+                            let compiled = self
+                                .shared
+                                .device
+                                .newRenderPipelineStateWithDescriptor_error(&d);
+                            if let (Ok(_), Some(cache)) = (&compiled, desc.cache) {
+                                let _guard = cache.archive_lock.write();
+                                if let Err(e) = cache
+                                    .archive
+                                    .addRenderPipelineFunctionsWithDescriptor_error(&d)
+                                {
+                                    log::debug!(
+                                        "metal: failed to add render pipeline to binary archive: {e:?}"
+                                    );
+                                }
+                            }
+                            compiled
+                        }
+                    }
                 }
                 MetalGenericRenderPipelineDescriptor::Mesh(d) => self
                     .shared
@@ -1762,51 +1779,76 @@ impl crate::Device for super::Device {
                 descriptor.setLabel(Some(&NSString::from_str(name)));
             }
 
-            // Bind the pipeline cache's archive so the driver loads this pipeline
-            // from it on a hit instead of recompiling (no `FailOnBinaryArchiveMiss`
-            // — a miss just compiles normally). The read lock lets concurrent
-            // compiles load from the archive in parallel while excluding a
-            // concurrent grow/serialize (see `PipelineCache::archive_lock`); it is
-            // held across creation so the load isn't raced by an `add`.
-            let cache_read = desc.cache.map(|cache| {
-                let guard = cache.archive_lock.read();
+            // With a pipeline cache attached, ask the archive FIRST
+            // (`FailOnBinaryArchiveMiss`: load the compiled binary or fail, never
+            // compile). A hit is the pipeline, counted, and the archive already
+            // holds it; a miss falls through to the plain compile below, after
+            // which the pipeline is added so a later `pipeline_cache_get_data`
+            // serializes it. The read lock lets concurrent creations load from the
+            // archive in parallel while excluding a grow/serialize (see
+            // `PipelineCache::archive_lock`); it is held across the probe so the
+            // load isn't raced by an `add`.
+            let mut raw: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>> = None;
+            if let Some(cache) = desc.cache {
+                let _read = cache.archive_lock.read();
                 let archives = NSArray::from_slice(&[cache.archive.as_ref()]);
                 descriptor.setBinaryArchives(Some(&archives));
-                guard
-            });
-
-            let raw = self
-                .shared
-                .device
-                .newComputePipelineStateWithDescriptor_options_reflection_error(
-                    &descriptor,
-                    MTLPipelineOption::empty(),
-                    None,
-                );
-            drop(cache_read);
-
-            let raw: Retained<ProtocolObject<dyn MTLComputePipelineState>> =
-                raw.map_err(|e: Retained<NSError>| {
-                    crate::PipelineError::Linkage(
-                        wgt::ShaderStages::COMPUTE,
-                        format!("new_compute_pipeline_state: {e:?}"),
-                    )
-                })?;
-
-            // Grow the archive with this pipeline so a later `pipeline_cache_get_data`
-            // serializes it. Adding an already-present pipeline is a no-op; caching is
-            // best-effort. The write lock excludes concurrent loads/grows. (Possible
-            // future optimization: only add on a real miss, detected via a
-            // `FailOnBinaryArchiveMiss` probe.)
-            if let Some(cache) = desc.cache {
-                let _guard = cache.archive_lock.write();
-                if let Err(e) = cache
-                    .archive
-                    .addComputePipelineFunctionsWithDescriptor_error(&descriptor)
-                {
-                    log::debug!("metal: failed to add compute pipeline to binary archive: {e:?}");
+                match self
+                    .shared
+                    .device
+                    .newComputePipelineStateWithDescriptor_options_reflection_error(
+                        &descriptor,
+                        MTLPipelineOption::FailOnBinaryArchiveMiss,
+                        None,
+                    ) {
+                    Ok(hit) => {
+                        self.counters.pipeline_cache_hits.add(1);
+                        raw = Some(hit);
+                    }
+                    Err(e) => {
+                        log::debug!("metal: compute pipeline binary archive miss: {e:?}");
+                        self.counters.pipeline_cache_misses.add(1);
+                    }
                 }
+                // A miss compiles from source below; the archive stays bound so a
+                // concurrent creation that has just added this pipeline can still
+                // be served.
             }
+
+            let raw: Retained<ProtocolObject<dyn MTLComputePipelineState>> = match raw {
+                Some(hit) => hit,
+                None => {
+                    let compiled = self
+                        .shared
+                        .device
+                        .newComputePipelineStateWithDescriptor_options_reflection_error(
+                            &descriptor,
+                            MTLPipelineOption::empty(),
+                            None,
+                        )
+                        .map_err(|e: Retained<NSError>| {
+                            crate::PipelineError::Linkage(
+                                wgt::ShaderStages::COMPUTE,
+                                format!("new_compute_pipeline_state: {e:?}"),
+                            )
+                        })?;
+                    // Grow the archive with the freshly compiled pipeline. Best-effort:
+                    // a failure to add leaves the pipeline valid and the next launch
+                    // cold. The write lock excludes concurrent loads/grows.
+                    if let Some(cache) = desc.cache {
+                        let _guard = cache.archive_lock.write();
+                        if let Err(e) = cache
+                            .archive
+                            .addComputePipelineFunctionsWithDescriptor_error(&descriptor)
+                        {
+                            log::debug!(
+                                "metal: failed to add compute pipeline to binary archive: {e:?}"
+                            );
+                        }
+                    }
+                    compiled
+                }
+            };
 
             self.counters.compute_pipelines.add(1);
 
