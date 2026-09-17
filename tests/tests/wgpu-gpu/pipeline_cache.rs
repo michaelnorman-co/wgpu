@@ -387,7 +387,7 @@ async fn validate_render_pipeline(ctx: &TestingContext, pipeline: &wgpu::RenderP
         .await
         .unwrap();
 
-    let data = cpu_buffer.slice(..).get_mapped_range().unwrap();
+    let data = cpu_buffer.slice(..).get_mapped_range();
     // Every pixel should be the fragment shader's constant colour (±1 for rounding).
     for px in data.chunks_exact(4) {
         for (channel, (&got, &want)) in px.iter().zip(RENDER_EXPECTED.iter()).enumerate() {
