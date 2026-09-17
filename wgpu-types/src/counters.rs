@@ -122,6 +122,19 @@ pub struct HalCounters {
     pub query_sets: InternalCounter,
     pub fences: InternalCounter,
 
+    // Pipeline cache
+    /// Pipelines the backend loaded from a [`PipelineCache`] instead of compiling
+    /// (Metal: an `MTLBinaryArchive` lookup answered). Backends without a
+    /// persistent cache never increment either counter.
+    ///
+    /// [`PipelineCache`]: ../wgpu/struct.PipelineCache.html
+    pub pipeline_cache_hits: InternalCounter,
+    /// Pipelines created with a [`PipelineCache`] attached that the cache did not
+    /// hold, so the driver compiled them (and the cache then grew by one).
+    ///
+    /// [`PipelineCache`]: ../wgpu/struct.PipelineCache.html
+    pub pipeline_cache_misses: InternalCounter,
+
     // Resources
     /// Amount of allocated gpu memory attributed to buffers, in bytes.
     pub buffer_memory: InternalCounter,

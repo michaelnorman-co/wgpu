@@ -1230,11 +1230,17 @@ impl super::CapabilitiesQuery {
         features.set(F::DEPTH_CLIP_CONTROL, self.supports_depth_clip_control);
         features.set(F::PRIMITIVE_INDEX, self.supports_shader_primitive_index);
 
-        // Persistent pipeline caching is backed by `MTLBinaryArchive` (macOS 11+,
-        // iOS 14+). See `Device::{create_pipeline_cache, pipeline_cache_get_data}`.
+        // Persistent pipeline caching is backed by `MTLBinaryArchive`. The API
+        // exists from macOS 11 / iOS 14, but archives built from runtime-compiled
+        // libraries misbehave on older systems (Blender's Cycles gates its own
+        // `MTLBinaryArchive` use to macOS 15.4+: "Issues with binary archives in
+        // older macOS versions"), so the feature is advertised only from that
+        // generation on; below it the feature is absent and callers keep whatever
+        // the OS shader cache gives them. See
+        // `Device::{create_pipeline_cache, pipeline_cache_get_data}`.
         features.set(
             F::PIPELINE_CACHE,
-            available!(macos = 11.0, ios = 14.0, tvos = 14.0, visionos = 1.0),
+            available!(macos = 15.4, ios = 18.4, tvos = 18.4, visionos = 2.4),
         );
 
         features.set(

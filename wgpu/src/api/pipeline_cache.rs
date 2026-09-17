@@ -63,6 +63,10 @@ use crate::*;
 ///
 /// This resource currently only works on the following backends:
 ///  - Vulkan
+///  - Metal (macOS 15.4+ / iOS 18.4+, via `MTLBinaryArchive`; a pipeline the
+///    archive holds is loaded without a driver compile, and the
+///    `pipeline_cache_hits` / `pipeline_cache_misses` internal counters say
+///    which happened)
 ///
 /// This type is unique to the Rust API of `wgpu`.
 ///
