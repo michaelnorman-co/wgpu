@@ -64,7 +64,15 @@ impl NativeTest {
                 std::env::set_var("MTL_DEBUG_LAYER", env_value);
                 if std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true") {
                     // Metal Shader Validation is entirely broken in the paravirtualized CI environment.
-                    std::env::set_var("MTL_SHADER_VALIDATION", env_value);
+                    // A test may also opt out (`TestParameters::metal_shader_validation`):
+                    // the layer instruments every compiled function, which defeats
+                    // `MTLBinaryArchive` lookups.
+                    let shader_validation =
+                        metal_validation && config.params.metal_shader_validation;
+                    std::env::set_var(
+                        "MTL_SHADER_VALIDATION",
+                        if shader_validation { "1" } else { "0" },
+                    );
                 }
 
                 execute_test(Some(&adapter_report), config, Some(test_info)).await;

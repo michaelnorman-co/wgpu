@@ -1,10 +1,11 @@
 use std::{fmt::Write, num::NonZeroU64};
 
-use wgpu_test::{gpu_test, GpuTestConfiguration, TestParameters, TestingContext};
+use wgpu_test::{gpu_test, FailureCase, GpuTestConfiguration, TestParameters, TestingContext};
 
 pub fn all_tests(vec: &mut Vec<wgpu_test::GpuTestInitializer>) {
     vec.push(PIPELINE_CACHE);
     vec.push(PIPELINE_CACHE_RENDER);
+    vec.push(PIPELINE_CACHE_METAL_ARCHIVE_HITS);
 }
 
 /// We want to test that using a pipeline cache doesn't cause failure
@@ -399,4 +400,154 @@ async fn validate_render_pipeline(ctx: &TestingContext, pipeline: &wgpu::RenderP
     }
     drop(data);
     cpu_buffer.unmap();
+}
+
+/// Metal only: the `MTLBinaryArchive` behind the cache actually ANSWERS. The two
+/// tests above prove a cache never breaks a pipeline; they cannot tell an
+/// archive hit from the OS shader cache (both make a second compile of the same
+/// text take milliseconds). This one reads the backend's own answer — the
+/// `pipeline_cache_hits` / `pipeline_cache_misses` internal counters, fed by the
+/// `FailOnBinaryArchiveMiss` probe in `create_compute_pipeline` — through four
+/// creations: an empty archive misses; the same archive then hits in memory; an
+/// archive rebuilt from `get_data()` bytes hits; and a cache seeded from garbage
+/// bytes is created (fallback to empty) and misses without an error.
+#[gpu_test]
+static PIPELINE_CACHE_METAL_ARCHIVE_HITS: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(
+        TestParameters::default()
+            .test_features_limits()
+            .features(wgpu::Features::PIPELINE_CACHE)
+            // Shader validation instruments the function; the archive then never
+            // matches it (measured: every lookup misses with the layer on).
+            .without_metal_shader_validation()
+            .skip(FailureCase::backend(
+                wgpu::Backends::all() - wgpu::Backends::METAL,
+            )),
+    )
+    .run_async(pipeline_cache_metal_archive_hits_test);
+
+/// Wider than [`ARRAY_SIZE`] so the compile is measurable against the probe.
+const HITS_ARRAY_SIZE: u64 = 256;
+
+async fn pipeline_cache_metal_archive_hits_test(ctx: TestingContext) {
+    let mut body = String::new();
+    for idx in 0..HITS_ARRAY_SIZE {
+        writeln!(body, "    output[{idx}] = {idx}u * 3u;")
+            .expect("`u64::fmt` and `String::write_fmt` are infallible");
+    }
+    // A per-process salt in a literal that reaches the MSL, so the OS shader
+    // cache cannot have seen this text before this process (the archive within
+    // the process is what is under test, and it must not be warm either).
+    let salt = std::process::id();
+    let shader = format!(
+        r#"
+        @group(0) @binding(0)
+        var<storage, read_write> output: array<u32>;
+
+        @compute @workgroup_size(1)
+        fn main() {{
+        {body}
+            output[0] = {salt}u;
+        }}
+        "#,
+    );
+    let sm = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("archive-hits shader"),
+            source: wgpu::ShaderSource::Wgsl(shader.into()),
+        });
+    let bgl = ctx
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("archive-hits bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(HITS_ARRAY_SIZE * 4),
+                },
+                count: None,
+            }],
+        });
+    let pipeline_layout = ctx
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("archive-hits layout"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+
+    let counters = || {
+        let c = ctx.device.get_internal_counters().hal;
+        (c.pipeline_cache_hits.read(), c.pipeline_cache_misses.read())
+    };
+    let make_cache = |data: Option<&[u8]>| unsafe {
+        ctx.device
+            .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                label: Some("archive-hits cache"),
+                data,
+                fallback: true,
+            })
+    };
+    let create = |cache: &wgpu::PipelineCache, what: &str| {
+        let before = counters();
+        let started = std::time::Instant::now();
+        let _pipeline = ctx
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("archive-hits pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &sm,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: Some(cache),
+            });
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        let after = counters();
+        let delta = (after.0 - before.0, after.1 - before.1);
+        eprintln!(
+            "PIPELINE_CACHE_METAL_ARCHIVE_HITS {what}: {ms:.1} ms, (hits, misses) += {delta:?}"
+        );
+        (delta, ms)
+    };
+
+    // 1. Empty archive: a miss, then the compile populates it.
+    let first = make_cache(None);
+    let (d1, cold_ms) = create(&first, "empty archive");
+    assert_eq!(d1, (0, 1), "an empty archive must miss exactly once");
+
+    // 2. Same archive, same text, in memory: the driver loads it.
+    let (d2, warm_ms) = create(&first, "same archive, in memory");
+    assert_eq!(
+        d2,
+        (1, 0),
+        "the archive that just grew by this pipeline must hit"
+    );
+
+    // 3. Serialize, rebuild from bytes, hit.
+    let bytes = first
+        .get_data()
+        .expect("a Metal archive with one pipeline serializes");
+    assert!(!bytes.is_empty());
+    let second = make_cache(Some(&bytes));
+    let (d3, reloaded_ms) = create(&second, "archive rebuilt from bytes");
+    assert_eq!(d3, (1, 0), "an archive rebuilt from its own bytes must hit");
+    eprintln!(
+        "PIPELINE_CACHE_METAL_ARCHIVE_HITS: cold {cold_ms:.1} ms, in-memory hit {warm_ms:.1} ms, \
+         reloaded hit {reloaded_ms:.1} ms, blob {} bytes",
+        bytes.len()
+    );
+
+    // 4. Garbage bytes: creation falls back to an empty archive; no error, a miss.
+    let garbage = vec![0xA5u8; 1024];
+    let third = make_cache(Some(&garbage));
+    let (d4, _) = create(&third, "archive seeded from garbage");
+    assert_eq!(
+        d4,
+        (0, 1),
+        "a cache seeded from garbage must fall back to empty and miss"
+    );
 }

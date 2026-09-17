@@ -26,6 +26,16 @@ pub struct TestParameters {
     /// For testing workarounds to Fxc bugs.
     pub force_fxc: bool,
 
+    /// On Metal, run WITHOUT the GPU shader-validation layer
+    /// (`MTL_SHADER_VALIDATION`), which the harness otherwise enables for every
+    /// Metal test. Shader validation instruments every function at compile time,
+    /// so an `MTLBinaryArchive` never matches an instrumented function: a test of
+    /// the pipeline cache's archive behaviour can only observe it with the layer
+    /// off. The setting is process-wide and read once, so it takes effect only
+    /// because each test runs in its own process. API validation
+    /// (`MTL_DEBUG_LAYER`) stays on.
+    pub metal_shader_validation: bool,
+
     /// Conditions under which this test should be skipped.
     pub skips: Vec<FailureCase>,
 
@@ -41,6 +51,7 @@ impl Default for TestParameters {
             required_limits: Limits::downlevel_webgl2_defaults(),
             required_instance_flags: InstanceFlags::empty(),
             force_fxc: false,
+            metal_shader_validation: true,
             // By default we skip the noop backend, and enable it if the test
             // parameters ask us to remove it.
             skips: vec![FailureCase::backend(wgpu::Backends::NOOP)],
@@ -51,6 +62,13 @@ impl Default for TestParameters {
 
 // Builder pattern to make it easier
 impl TestParameters {
+    /// Run this test without Metal's GPU shader-validation layer — see
+    /// [`TestParameters::metal_shader_validation`].
+    pub fn without_metal_shader_validation(mut self) -> Self {
+        self.metal_shader_validation = false;
+        self
+    }
+
     /// Set of common features that most internal tests require for compute and readback.
     pub fn test_features_limits(self) -> Self {
         self.downlevel_flags(DownlevelFlags::COMPUTE_SHADERS)
