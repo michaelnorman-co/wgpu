@@ -11,9 +11,8 @@ use objc2_foundation::{ns_string, NSArray, NSError, NSRange, NSString, NSUIntege
 use objc2_metal::{
     MTLAccelerationStructure, MTLAccelerationStructureInstanceOptions, MTLBinaryArchive,
     MTLBinaryArchiveDescriptor, MTLBuffer, MTLCaptureManager, MTLCaptureScope, MTLCompileOptions,
-    MTLComputePipelineDescriptor,
-    MTLComputePipelineState, MTLCounterSampleBufferDescriptor, MTLCounterSet, MTLDepthClipMode,
-    MTLDepthStencilDescriptor, MTLDevice, MTLFunction,
+    MTLComputePipelineDescriptor, MTLComputePipelineState, MTLCounterSampleBufferDescriptor,
+    MTLCounterSet, MTLDepthClipMode, MTLDepthStencilDescriptor, MTLDevice, MTLFunction,
     MTLIndirectAccelerationStructureInstanceDescriptor, MTLLanguageVersion, MTLLibrary,
     MTLMeshRenderPipelineDescriptor, MTLMutability, MTLPackedFloat3, MTLPackedFloat4x3,
     MTLPipelineBufferDescriptorArray, MTLPipelineOption, MTLPixelFormat, MTLPrimitiveTopologyClass,
