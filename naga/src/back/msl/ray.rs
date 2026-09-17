@@ -260,45 +260,45 @@ impl<W: Write> Writer<W> {
                     first_time: false,
                 };
 
-                write!(self.out, "{inner_level}{naga_ray_desc_ty} desc = ")?;
+                write!(self.out, "{inner_level}{naga_ray_desc_ty} naga_ray_desc = ")?;
                 self.put_expression(descriptor, &context.expression, false)?;
                 writeln!(self.out, ";")?;
 
                 // Set up intersection parameters
                 writeln!(
                     self.out,
-                    "{inner_level}{RT_NAMESPACE}::intersection_params params;"
+                    "{inner_level}{RT_NAMESPACE}::intersection_params naga_params;"
                 )?;
 
                 {
                     // Determine whether or not to cull opaque/non-opaques
                     let f_opaque = back::RayFlag::CULL_OPAQUE.bits();
                     let f_no_opaque = back::RayFlag::CULL_NO_OPAQUE.bits();
-                    writeln!(self.out, "{inner_level}{RT_NAMESPACE}::opacity_cull_mode cull_mode = 
-{inner_level}{INDENT}(desc.flags & {f_opaque}) != 0 ? {RT_NAMESPACE}::opacity_cull_mode::opaque : (
-{inner_level}{INDENT}{INDENT}(desc.flags & {f_no_opaque}) != 0 ? {RT_NAMESPACE}::opacity_cull_mode::non_opaque : {RT_NAMESPACE}::opacity_cull_mode::none
+                    writeln!(self.out, "{inner_level}{RT_NAMESPACE}::opacity_cull_mode naga_cull_mode = 
+{inner_level}{INDENT}(naga_ray_desc.flags & {f_opaque}) != 0 ? {RT_NAMESPACE}::opacity_cull_mode::opaque : (
+{inner_level}{INDENT}{INDENT}(naga_ray_desc.flags & {f_no_opaque}) != 0 ? {RT_NAMESPACE}::opacity_cull_mode::non_opaque : {RT_NAMESPACE}::opacity_cull_mode::none
 {inner_level}{INDENT});")?;
                     writeln!(
                         self.out,
-                        "{inner_level}params.set_opacity_cull_mode(cull_mode);"
+                        "{inner_level}naga_params.set_opacity_cull_mode(naga_cull_mode);"
                     )?;
 
                     if context.expression.ray_query_initialization_tracking {
-                        writeln!(self.out, "{inner_level}bool force_opacity = cull_mode == {RT_NAMESPACE}::opacity_cull_mode::none;")?;
+                        writeln!(self.out, "{inner_level}bool naga_force_opacity = naga_cull_mode == {RT_NAMESPACE}::opacity_cull_mode::none;")?;
                     }
                 }
                 {
                     let mut current_level = inner_level;
                     if context.expression.ray_query_initialization_tracking {
-                        writeln!(self.out, "{inner_level}if (force_opacity) {{")?;
+                        writeln!(self.out, "{inner_level}if (naga_force_opacity) {{")?;
                         current_level = current_level.next();
                     }
                     // Determine whether to force a particular opacity
                     let f_opaque = back::RayFlag::OPAQUE.bits();
                     let f_no_opaque = back::RayFlag::NO_OPAQUE.bits();
-                    writeln!(self.out, "{current_level}params.force_opacity(
-{current_level}    (desc.flags & {f_opaque}) != 0 ? {RT_NAMESPACE}::forced_opacity::opaque : (
-{current_level}        (desc.flags & {f_no_opaque}) != 0 ? {RT_NAMESPACE}::forced_opacity::non_opaque : {RT_NAMESPACE}::forced_opacity::none
+                    writeln!(self.out, "{current_level}naga_params.force_opacity(
+{current_level}    (naga_ray_desc.flags & {f_opaque}) != 0 ? {RT_NAMESPACE}::forced_opacity::opaque : (
+{current_level}        (naga_ray_desc.flags & {f_no_opaque}) != 0 ? {RT_NAMESPACE}::forced_opacity::non_opaque : {RT_NAMESPACE}::forced_opacity::none
 {current_level}    )
 {current_level});")?;
 
@@ -310,13 +310,13 @@ impl<W: Write> Writer<W> {
                     let flag = back::RayFlag::TERMINATE_ON_FIRST_HIT.bits();
                     writeln!(
                         self.out,
-                        "{inner_level}params.accept_any_intersection((desc.flags & {flag}) != 0);"
+                        "{inner_level}naga_params.accept_any_intersection((naga_ray_desc.flags & {flag}) != 0);"
                     )?;
                 }
 
                 writeln!(
                     self.out,
-                    "{inner_level}{RT_NAMESPACE}::ray ray = {RT_NAMESPACE}::ray(desc.origin, desc.dir, desc.tmin, desc.tmax);"
+                    "{inner_level}{RT_NAMESPACE}::ray naga_ray = {RT_NAMESPACE}::ray(naga_ray_desc.origin, naga_ray_desc.dir, naga_ray_desc.tmin, naga_ray_desc.tmax);"
                 )?;
 
                 let mut init_level = inner_level;
@@ -324,7 +324,7 @@ impl<W: Write> Writer<W> {
                 // The `reset` function is virtually undocumented (many of the Metal ray tracing functions lack it), so to be safe,
                 // this assumes an invalid ray is UB (NOTE: invalid ray behaviour is defined for intersectors).
                 if context.expression.ray_query_initialization_tracking {
-                    write!(self.out, "{inner_level}bool invalid_nan_infs = ")?;
+                    write!(self.out, "{inner_level}bool naga_invalid_nan_infs = ")?;
                     // tmax needs special handling because it can be INF
                     for (idx, &field_access) in [
                         "origin.x", "origin.y", "origin.z", "dir.x", "dir.y", "dir.z", "tmin",
@@ -336,24 +336,24 @@ impl<W: Write> Writer<W> {
                             write!(self.out, " || ")?;
                         }
 
-                        self.write_not_finite(&format!("desc.{field_access}"))?;
+                        self.write_not_finite(&format!("naga_ray_desc.{field_access}"))?;
                     }
 
                     write!(self.out, " || ")?;
-                    self.write_is_nan("desc.tmax")?;
+                    self.write_is_nan("naga_ray_desc.tmax")?;
                     writeln!(self.out, ";")?;
 
                     // Metal also requires that tmax >= 0.0, but if tmax >= tmin and tmin >= 0.0, tmax must be >= 0.0
-                    writeln!(self.out, "{inner_level}bool invalid_t = (desc.tmin > desc.tmax) || (desc.tmin < 0.0);")?;
+                    writeln!(self.out, "{inner_level}bool naga_invalid_t = (naga_ray_desc.tmin > naga_ray_desc.tmax) || (naga_ray_desc.tmin < 0.0);")?;
                     // Metal requires that the length of the direction is not 0.0. This is the case only when all the
                     // components are zero.
                     //
                     // Use absolute to cover signed zero.
-                    writeln!(self.out, "{inner_level}bool invalid_dir = {NAMESPACE}::all({NAMESPACE}::abs(desc.dir) == 0.0);")?;
+                    writeln!(self.out, "{inner_level}bool naga_invalid_dir = {NAMESPACE}::all({NAMESPACE}::abs(naga_ray_desc.dir) == 0.0);")?;
 
                     writeln!(
                         self.out,
-                        "{inner_level}if (!(invalid_dir || invalid_t || invalid_nan_infs)) {{"
+                        "{inner_level}if (!(naga_invalid_dir || naga_invalid_t || naga_invalid_nan_infs)) {{"
                     )?;
                     init_level = init_level.next();
                 }
@@ -363,9 +363,9 @@ impl<W: Write> Writer<W> {
                 // or by calling reset. Ray queries cannot be assigned to in metal, so reset needs to
                 // be called.
                 self.put_expression(query, &context.expression, true)?;
-                write!(self.out, ".reset(ray,")?;
+                write!(self.out, ".reset(naga_ray,")?;
                 self.put_expression(acceleration_structure, &context.expression, true)?;
-                writeln!(self.out, ", desc.cull_mask, params);")?;
+                writeln!(self.out, ", naga_ray_desc.cull_mask, naga_params);")?;
                 if context.expression.ray_query_initialization_tracking {
                     // We don't set the initialization tracker to zero (uninitialized)
                     // if the call fails. Resetting to uninitialized might be useful
@@ -377,7 +377,7 @@ impl<W: Write> Writer<W> {
                     )?;
                     writeln!(
                         self.out,
-                        "{init_level}{tmax_tracker_expr_name} = desc.tmax;"
+                        "{init_level}{tmax_tracker_expr_name} = naga_ray_desc.tmax;"
                     )?;
                     writeln!(self.out, "{inner_level}}}")?;
                 }
