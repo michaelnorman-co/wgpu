@@ -2175,6 +2175,7 @@ impl crate::Device for super::Device {
             sync: Arc::new((Mutex::new(0), Condvar::new())),
             pending_command_buffers: RwLock::new(Vec::new()),
             shared_event,
+            fault: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -2183,7 +2184,7 @@ impl crate::Device for super::Device {
     }
 
     unsafe fn get_fence_value(&self, fence: &super::Fence) -> DeviceResult<crate::FenceValue> {
-        Ok(fence.get_latest())
+        fence.get_latest()
     }
     unsafe fn wait(
         &self,
@@ -2191,6 +2192,9 @@ impl crate::Device for super::Device {
         wait_value: crate::FenceValue,
         timeout: Option<core::time::Duration>,
     ) -> DeviceResult<bool> {
+        // A refused command buffer still advances the fence value; the work
+        // it stood for never ran, so the wait reports the loss instead.
+        fence.check_fault()?;
         let (ref mutex, ref condvar) = *fence.sync;
         let mut lock = mutex.lock();
 
@@ -2212,11 +2216,16 @@ impl crate::Device for super::Device {
         if let Some(timeout) = timeout {
             let result = condvar.wait_while_for(&mut lock, |value| *value < wait_value, timeout);
             if result.timed_out() {
-                return Ok(*lock >= wait_value);
+                let done = *lock >= wait_value;
+                drop(lock);
+                fence.check_fault()?;
+                return Ok(done);
             }
         } else {
             condvar.wait_while(&mut lock, |value| *value < wait_value);
         }
+        drop(lock);
+        fence.check_fault()?;
 
         Ok(true)
     }

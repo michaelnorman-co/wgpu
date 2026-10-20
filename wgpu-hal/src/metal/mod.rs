@@ -736,10 +736,27 @@ impl crate::Queue for Queue {
 
             let extra_command_buffer = {
                 let fence_sync = Arc::clone(&signal_fence.sync);
-                let block = block2::RcBlock::new(move |_cmd_buf| {
-                    *fence_sync.0.lock() = signal_value;
-                    fence_sync.1.notify_all();
-                });
+                let fence_fault = Arc::clone(&signal_fence.fault);
+                let block = block2::RcBlock::new(
+                    move |cmd_buf: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+                        // A command buffer Metal refused (a GPU timeout, a page
+                        // fault, or "ignored for causing prior errors") still
+                        // completes. Its work did not run, and Metal ignores every
+                        // later submission on this queue, so it is a lost device:
+                        // record it, and the fence reports `DeviceError::Lost`.
+                        let cmd_buf = unsafe { cmd_buf.as_ref() };
+                        if cmd_buf.status() == MTLCommandBufferStatus::Error {
+                            let why = cmd_buf.error().map_or_else(
+                                || String::from("no error description"),
+                                |e| e.localizedDescription().to_string(),
+                            );
+                            log::error!("Metal refused a submitted command buffer: {why}");
+                            fence_fault.lock().get_or_insert(why);
+                        }
+                        *fence_sync.0.lock() = signal_value;
+                        fence_sync.1.notify_all();
+                    },
+                );
 
                 let raw = match command_buffers.last() {
                     Some(&cmd_buf) => cmd_buf.raw.clone(),
@@ -1256,6 +1273,12 @@ pub struct Fence {
     /// The pending fence values have to be ascending.
     pending_command_buffers: RwLock<Vec<PendingCommandBuffer>>,
     shared_event: Option<Retained<ProtocolObject<dyn MTLSharedEvent>>>,
+    /// Metal's description of the first command buffer signalling this fence
+    /// that ended in `MTLCommandBufferStatus::Error`. Once set, the fence
+    /// answers `DeviceError::Lost`: the refused work did not run and Metal
+    /// ignores the queue's later submissions, so a fence value that kept
+    /// advancing would report work done that never happened.
+    fault: Arc<Mutex<Option<String>>>,
 }
 
 type PendingCommandBuffer = (
@@ -1269,22 +1292,46 @@ unsafe impl Send for Fence {}
 unsafe impl Sync for Fence {}
 
 impl Fence {
-    fn get_latest(&self) -> crate::FenceValue {
+    fn get_latest(&self) -> Result<crate::FenceValue, crate::DeviceError> {
         let mut max_value = *self.sync.0.lock();
         let pending_command_buffers = self.pending_command_buffers.read();
         for &(value, ref cmd_buf) in pending_command_buffers.iter() {
             match cmd_buf.status() {
-                MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error => {
+                MTLCommandBufferStatus::Completed => {
                     max_value = value;
+                }
+                MTLCommandBufferStatus::Error => {
+                    let why = cmd_buf.error().map_or_else(
+                        || String::from("no error description"),
+                        |e| e.localizedDescription().to_string(),
+                    );
+                    self.fault.lock().get_or_insert(why);
                 }
                 _ => {}
             }
         }
-        max_value
+        self.check_fault()?;
+        Ok(max_value)
+    }
+
+    /// `DeviceError::Lost` once any command buffer signalling this fence was
+    /// refused by Metal (see [`Fence::fault`]).
+    fn check_fault(&self) -> Result<(), crate::DeviceError> {
+        match self.fault.lock().as_deref() {
+            Some(why) => {
+                log::error!("Metal device lost: a submitted command buffer was refused ({why})");
+                Err(crate::DeviceError::Lost)
+            }
+            None => Ok(()),
+        }
     }
 
     fn maintain(&self) {
-        let latest = self.get_latest();
+        // A faulted fence keeps its pending buffers: nothing reads them again
+        // except to report the loss.
+        let Ok(latest) = self.get_latest() else {
+            return;
+        };
         self.pending_command_buffers
             .write()
             .retain(|&(value, _)| value > latest);

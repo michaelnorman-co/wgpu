@@ -17,7 +17,11 @@ pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
 
     #[cfg(not(wasm_test))]
     {
-        vec.extend([DEVICE_LIFETIME_CHECK, MULTIPLE_DEVICES]);
+        vec.extend([
+            DEVICE_LIFETIME_CHECK,
+            MULTIPLE_DEVICES,
+            METAL_REFUSED_SUBMIT_LOSES_DEVICE,
+        ]);
     }
 }
 
@@ -706,4 +710,93 @@ static DEVICE_AND_QUEUE_HAVE_DIFFERENT_IDS: GpuTestConfiguration = GpuTestConfig
         drop(queue);
         drop(device2);
         drop(queue2); // this would previously panic since we would try to use the Device ID to drop the Queue
+    });
+
+/// A command buffer Metal refuses (here: a dispatch that outruns the GPU
+/// watchdog, so Metal ends it with `MTLCommandBufferStatus::Error`) must lose
+/// the device. Metal still *completes* a refused command buffer, and it ignores
+/// every later submission on that queue; before this test the fence counted the
+/// refused buffer as done, so `poll` answered `Ok` and every later readback
+/// returned the untouched (zeroed) memory with no error anywhere.
+#[gpu_test]
+#[cfg(not(wasm_test))]
+static METAL_REFUSED_SUBMIT_LOSES_DEVICE: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(
+        TestParameters::default()
+            .downlevel_flags(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+            .limits(wgpu::Limits::downlevel_defaults())
+            .skip(FailureCase::backend(!wgpu::Backends::METAL)),
+    )
+    .run_async(|ctx| async move {
+        static LOST: AtomicBool = AtomicBool::new(false);
+        ctx.device
+            .set_device_lost_callback(Box::new(|_reason, _message| {
+                LOST.store(true, std::sync::atomic::Ordering::SeqCst);
+            }));
+        // Far longer than any GPU watchdog: ~2^60 dependent multiply-adds per
+        // invocation. The store keeps the loop from being optimised away.
+        let module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("outruns the watchdog"),
+                source: wgpu::ShaderSource::Wgsl(
+                    "@group(0) @binding(0) var<storage, read_write> out: array<f32>;
+                 @compute @workgroup_size(64)
+                 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                     var acc = f32(id.x);
+                     for (var i = 0u; i < 0xFFFFFFFFu; i++) {
+                         for (var j = 0u; j < 0xFFFFFFFFu; j++) {
+                             acc = fma(acc, 1.0000001, 1.0);
+                         }
+                     }
+                     out[id.x] = acc;
+                 }"
+                    .into(),
+                ),
+            });
+        let pipeline = ctx
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: None,
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 4 * 64 * 1024,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(1024, 1, 1);
+        }
+        ctx.queue.submit([encoder.finish()]);
+        // A lost device makes `poll` fail (wgpu raises it as a fatal error,
+        // which panics); either way it must not answer "done".
+        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.device.poll(wgpu::PollType::wait_indefinitely())
+        }));
+        assert!(
+            !matches!(polled, Ok(Ok(_))),
+            "a submit Metal refused was reported as done"
+        );
+        assert!(
+            LOST.load(std::sync::atomic::Ordering::SeqCst),
+            "a submit Metal refused must lose the device"
+        );
     });
