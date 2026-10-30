@@ -105,5 +105,48 @@ macro_rules! impl_eq_ord_hash_arc_address {
     };
 }
 
+/// Implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`, and `Hash` for a type by proxying the operations to the pair
+/// `(context, id)`: the instance first, then the id.
+///
+/// Ids of wgpu-core are numbered per `Global` (per `wgpu::Instance`), so the first device of every instance is
+/// `(0, 1)`; comparing the id alone makes handles of two instances equal. The `context` field must itself implement
+/// the five traits by instance identity.
+///
+/// ```ignore
+/// impl_eq_ord_hash_proxy_in_instance!(MyType => context_field, id_field);
+/// ```
+#[cfg_attr(not(any(wgpu_core, custom)), expect(unused_macros))]
+macro_rules! impl_eq_ord_hash_proxy_in_instance {
+    ($type:ty => $context:ident, $id:ident) => {
+        impl PartialEq for $type {
+            fn eq(&self, other: &Self) -> bool {
+                (&self.$context, &self.$id) == (&other.$context, &other.$id)
+            }
+        }
+
+        impl Eq for $type {}
+
+        impl PartialOrd for $type {
+            fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl Ord for $type {
+            fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+                (&self.$context, &self.$id).cmp(&(&other.$context, &other.$id))
+            }
+        }
+
+        impl core::hash::Hash for $type {
+            fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+                (&self.$context, &self.$id).hash(state)
+            }
+        }
+    };
+}
+
 #[cfg_attr(not(any(wgpu_core, custom)), expect(unused_imports))]
-pub(crate) use {impl_eq_ord_hash_arc_address, impl_eq_ord_hash_proxy};
+pub(crate) use {
+    impl_eq_ord_hash_arc_address, impl_eq_ord_hash_proxy, impl_eq_ord_hash_proxy_in_instance,
+};

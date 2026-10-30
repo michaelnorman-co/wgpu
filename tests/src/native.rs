@@ -17,6 +17,7 @@ type NativeTestFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 struct NativeTest {
     name: String,
     future: NativeTestFuture,
+    ignore: Option<&'static str>,
 }
 
 impl NativeTest {
@@ -48,6 +49,7 @@ impl NativeTest {
         );
         Self {
             name: full_name,
+            ignore: config.params.ignore,
             future: Box::pin(async move {
                 // Enable metal validation layers if we're running on metal.
                 //
@@ -83,6 +85,7 @@ impl NativeTest {
             pollster::block_on(self.future);
             Ok(())
         })
+        .with_ignored_flag(self.ignore.is_some())
     }
 }
 

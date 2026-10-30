@@ -21,6 +21,7 @@ pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
             DEVICE_LIFETIME_CHECK,
             MULTIPLE_DEVICES,
             METAL_REFUSED_SUBMIT_LOSES_DEVICE,
+            DEVICES_OF_TWO_INSTANCES_ARE_NEVER_EQUAL,
         ]);
     }
 }
@@ -718,6 +719,8 @@ static DEVICE_AND_QUEUE_HAVE_DIFFERENT_IDS: GpuTestConfiguration = GpuTestConfig
 /// every later submission on that queue; before this test the fence counted the
 /// refused buffer as done, so `poll` answered `Ok` and every later readback
 /// returned the untouched (zeroed) memory with no error anywhere.
+///
+/// Ignored: trips the macOS GPU watchdog on purpose; it restarted the laptop on 2026-10-30. Run only by hand, alone, on an idle machine.
 #[gpu_test]
 #[cfg(not(wasm_test))]
 static METAL_REFUSED_SUBMIT_LOSES_DEVICE: GpuTestConfiguration = GpuTestConfiguration::new()
@@ -725,7 +728,8 @@ static METAL_REFUSED_SUBMIT_LOSES_DEVICE: GpuTestConfiguration = GpuTestConfigur
         TestParameters::default()
             .downlevel_flags(wgpu::DownlevelFlags::COMPUTE_SHADERS)
             .limits(wgpu::Limits::downlevel_defaults())
-            .skip(FailureCase::backend(!wgpu::Backends::METAL)),
+            .skip(FailureCase::backend(!wgpu::Backends::METAL))
+            .ignore("trips the macOS GPU watchdog on purpose; it restarted the laptop on 2026-10-30. Run only by hand, alone, on an idle machine"),
     )
     .run_async(|ctx| async move {
         static LOST: AtomicBool = AtomicBool::new(false);
@@ -800,3 +804,37 @@ static METAL_REFUSED_SUBMIT_LOSES_DEVICE: GpuTestConfiguration = GpuTestConfigur
             "a submit Metal refused must lose the device"
         );
     });
+
+/// wgpu-core numbers its ids per instance, so the first device of every
+/// instance is `(0, 1)`. Two devices of two instances must still differ, and a
+/// clone must equal its original; before the handles compared instance + id, a
+/// cache keyed by device handed one instance's device the other's pipeline
+/// cache.
+#[gpu_test]
+#[cfg(not(wasm_test))]
+static DEVICES_OF_TWO_INSTANCES_ARE_NEVER_EQUAL: GpuTestConfiguration =
+    GpuTestConfiguration::new()
+        .parameters(TestParameters::default())
+        .run_async(|ctx| async move {
+            let backends = wgpu::Backends::from(ctx.adapter.get_info().backend);
+            let mut devices = Vec::new();
+            for _ in 0..2 {
+                let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                    backends,
+                    ..wgpu::InstanceDescriptor::new_without_display_handle()
+                });
+                let adapter = instance
+                    .request_adapter(&wgpu::RequestAdapterOptions::default())
+                    .await
+                    .expect("no adapter");
+                let (device, queue) = adapter
+                    .request_device(&Default::default())
+                    .await
+                    .expect("no device");
+                devices.push((device, queue, adapter, instance));
+            }
+            let d1 = &devices[0].0;
+            let d2 = &devices[1].0;
+            assert!(d1 != d2, "devices of two instances compared equal");
+            assert!(*d1 == d1.clone(), "a clone must equal its device");
+        });

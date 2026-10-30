@@ -35,6 +35,10 @@ pub struct TestParameters {
     /// For certain features (ray tracing), metal shader validation is completely
     /// broken
     pub disable_mtl_shader_validation: bool,
+
+    /// Harness equivalent of `#[ignore = reason]`: when `Some`, the test is
+    /// listed but not run unless libtest is given `--ignored` / `--include-ignored`.
+    pub ignore: Option<&'static str>,
 }
 
 impl Default for TestParameters {
@@ -50,6 +54,7 @@ impl Default for TestParameters {
             skips: vec![FailureCase::backend(wgpu::Backends::NOOP)],
             failures: Vec::new(),
             disable_mtl_shader_validation: false,
+            ignore: None,
         }
     }
 }
@@ -118,6 +123,13 @@ impl TestParameters {
     /// to break. This disables it so it can be tested.
     pub fn disable_mtl_shader_validation(mut self) -> Self {
         self.disable_mtl_shader_validation = true;
+        self
+    }
+
+    /// The harness's `#[ignore = reason]`: the test is listed but not run unless
+    /// libtest is given `--ignored` / `--include-ignored`.
+    pub fn ignore(mut self, reason: &'static str) -> Self {
+        self.ignore = Some(reason);
         self
     }
 }
