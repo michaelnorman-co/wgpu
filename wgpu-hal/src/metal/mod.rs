@@ -739,20 +739,7 @@ impl crate::Queue for Queue {
                 let fence_fault = Arc::clone(&signal_fence.fault);
                 let block = block2::RcBlock::new(
                     move |cmd_buf: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
-                        // A command buffer Metal refused (a GPU timeout, a page
-                        // fault, or "ignored for causing prior errors") still
-                        // completes. Its work did not run, and Metal ignores every
-                        // later submission on this queue, so it is a lost device:
-                        // record it, and the fence reports `DeviceError::Lost`.
-                        let cmd_buf = unsafe { cmd_buf.as_ref() };
-                        if cmd_buf.status() == MTLCommandBufferStatus::Error {
-                            let why = cmd_buf.error().map_or_else(
-                                || String::from("no error description"),
-                                |e| e.localizedDescription().to_string(),
-                            );
-                            log::error!("Metal refused a submitted command buffer: {why}");
-                            fence_fault.lock().get_or_insert(why);
-                        }
+                        record_refusal(unsafe { cmd_buf.as_ref() }, &fence_fault);
                         *fence_sync.0.lock() = signal_value;
                         fence_sync.1.notify_all();
                     },
@@ -797,6 +784,28 @@ impl crate::Queue for Queue {
                     None => Some(raw),
                 }
             };
+
+            // Every command buffer of the submit records a refusal, not only the
+            // one that signals the fence: the buffer the GPU scheduler kills as a
+            // hang (`kIOGPUCommandBufferCallbackErrorHang`) is often an earlier
+            // one while the last completes normally. Measured 2026-11-12 on an
+            // M1 Max: a hung marching pass restarted the GPU and every frame
+            // still read back as done.
+            let fence_fault = Arc::clone(&signal_fence.fault);
+            let refusal_only = block2::RcBlock::new(
+                move |cmd_buf: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+                    record_refusal(unsafe { cmd_buf.as_ref() }, &fence_fault);
+                },
+            );
+            if let Some((_, earlier)) = command_buffers.split_last() {
+                for cmd_buffer in earlier {
+                    unsafe {
+                        cmd_buffer
+                            .raw
+                            .addCompletedHandler(block2::RcBlock::as_ptr(&refusal_only))
+                    };
+                }
+            }
 
             for cmd_buffer in command_buffers {
                 cmd_buffer.raw.commit();
@@ -1279,6 +1288,21 @@ pub struct Fence {
     /// ignores the queue's later submissions, so a fence value that kept
     /// advancing would report work done that never happened.
     fault: Arc<Mutex<Option<String>>>,
+}
+
+/// A command buffer Metal refused (a GPU timeout or hang, a page fault, or
+/// "ignored for causing prior errors") still completes. Its work did not run,
+/// and Metal ignores every later submission on this queue, so it is a lost
+/// device: record the first refusal, and the fence reports `DeviceError::Lost`.
+fn record_refusal(cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>, fault: &Mutex<Option<String>>) {
+    if cmd_buf.status() == MTLCommandBufferStatus::Error {
+        let why = cmd_buf.error().map_or_else(
+            || String::from("no error description"),
+            |e| e.localizedDescription().to_string(),
+        );
+        log::error!("Metal refused a submitted command buffer: {why}");
+        fault.lock().get_or_insert(why);
+    }
 }
 
 type PendingCommandBuffer = (
